@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "comfyui-mcp"
+version = "0.1.0"
+description = "Model Context Protocol server for ComfyUI workflows and model catalog"
+authors = [{ name = "ComfyUI MCP" }]
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "anyio>=4.4.0",
+    "mcp>=1.19.0",
+]
+
+[project.scripts]
+comfyui-mcp = "comfyui_mcp.server:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

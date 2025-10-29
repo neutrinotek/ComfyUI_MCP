@@ -48,7 +48,7 @@ If you prefer `uvx`, the same configuration can be expressed as:
     "command": "uvx",
     "args": [
       "--from",
-      "comfyui-mcp",
+      ".",
       "comfyui-mcp",
       "--workflow-dir",
       "./workflows",
@@ -58,5 +58,9 @@ If you prefer `uvx`, the same configuration can be expressed as:
   }
 }
 ```
+
+When referencing the project locally with `uvx`, ensure the working directory is set to the
+repository root (or adjust the `--from` path accordingly) so the package can be resolved without
+requiring it to be published to an external index.
 
 Place your ComfyUI workflow files in the `workflows/` directory (or whatever directory you configure) so they are available to the LLM.

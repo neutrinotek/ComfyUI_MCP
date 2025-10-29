@@ -135,9 +135,13 @@ class ComfyUIModelClient:
             raise RuntimeError("Model client not initialised")
 
         effective_path = path.strip("/") if path else ""
-        url = self._compose_url(effective_path)
+        params: dict[str, Any] = {"recursive": str(recursive).lower()}
+        if effective_path:
+            params["path"] = effective_path
 
-        response = await self._client.get(url, params={"recursive": str(recursive).lower()})
+        url = self._compose_url()
+
+        response = await self._client.get(url, params=params)
         response.raise_for_status()
 
         parsed = await self._parse_response(response)
@@ -186,9 +190,7 @@ class ComfyUIModelClient:
         except json.JSONDecodeError:
             return {"raw": text}
 
-    def _compose_url(self, path: str) -> str:
-        if path:
-            return f"{self.models_base_url}/{path}"
+    def _compose_url(self) -> str:
         return self.models_base_url
 
     def _flatten(self, payload: Any, *, prefix: str = "") -> list[dict[str, Any]]:
@@ -386,9 +388,7 @@ def create_server(config: ServerConfig) -> FastMCP:
         result = await model_client.list_models(path=path, recursive=recursive, search=search)
         if context is not None:
             context.info(
-                "Retrieved %s model entries from %s",
-                len(result.get("entries", [])),
-                result.get("base_url"),
+                f"Retrieved {len(result.get('entries', []))} model entries from {result.get('base_url')}"
             )
         return result
 

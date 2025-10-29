@@ -33,8 +33,7 @@ The installed `comfyui-mcp` entry point launches the MCP server over stdio. Comm
 | Purpose | CLI flag | Environment variable | Default |
 |---------|----------|----------------------|---------|
 | Workflow directory | `--workflow-dir` | `COMFYUI_WORKFLOW_DIR` | `<repo>/workflows` |
-| ComfyUI API base URL | `--api-base-url` | `COMFYUI_API_BASE_URL` | `http://10.27.27.5:8000/` |
-| Models endpoint | `--models-base-url` | `COMFYUI_MODELS_BASE_URL` | `<api-base-url>/api/models` |
+| ComfyUI API base URL | `--api-base-url` | `COMFYUI_API_BASE_URL` | `http://127.0.0.1:8188/` |
 | HTTP timeout (seconds) | `--http-timeout` | `COMFYUI_HTTP_TIMEOUT` | `30` |
 | Log level | `--log-level` | `COMFYUI_MCP_LOG_LEVEL` | `INFO` |
 
@@ -52,8 +51,8 @@ If you prefer `uvx`, the same configuration can be expressed as:
       "comfyui-mcp",
       "--workflow-dir",
       "./workflows",
-      "--models-base-url",
-      "http://10.27.27.5:8000/api/models"
+      "--api-base-url",
+      "http://127.0.0.1:8188/"
     ]
   }
 }

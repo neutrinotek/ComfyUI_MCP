@@ -25,7 +25,7 @@ class ServerConfig:
     """Configuration container for the MCP server."""
 
     workflow_dir: Path
-    models_base_url: str
+    api_base_url: str
     http_timeout: float = 30.0
 
     @classmethod
@@ -38,12 +38,15 @@ class ServerConfig:
             or Path.cwd() / "workflows"
         )
 
-        models_base_url = (
-            args.models_base_url
-            or os.environ.get("COMFYUI_MODELS_BASE_URL")
-            or _derive_models_url(
-                args.api_base_url or os.environ.get("COMFYUI_API_BASE_URL")
-            )
+        legacy_models_url = getattr(args, "models_base_url", None) or os.environ.get(
+            "COMFYUI_MODELS_BASE_URL"
+        )
+
+        api_base_url = _normalise_api_base_url(
+            args.api_base_url
+            or os.environ.get("COMFYUI_API_BASE_URL")
+            or _fallback_models_url(legacy_models_url)
+            or "http://127.0.0.1:8188"
         )
 
         timeout = float(
@@ -54,17 +57,37 @@ class ServerConfig:
 
         return cls(
             workflow_dir=workflow_dir,
-            models_base_url=models_base_url,
+            api_base_url=api_base_url,
             http_timeout=timeout,
         )
 
 
-def _derive_models_url(api_base_url: Optional[str]) -> str:
-    """Infer the models endpoint from the broader ComfyUI API base URL."""
+def _normalise_api_base_url(raw: str) -> str:
+    """Ensure the configured base URL is well-formed."""
 
-    default_base = "http://10.27.27.5:8000/"
-    base = (api_base_url or default_base).rstrip("/") + "/"
-    return urljoin(base, "api/models")
+    candidate = raw.strip()
+    if not candidate:
+        raise ValueError("ComfyUI API base URL cannot be empty")
+    if "://" not in candidate:
+        candidate = f"http://{candidate}"
+    return candidate.rstrip("/")
+
+
+def _fallback_models_url(raw: Optional[str]) -> Optional[str]:
+    """Allow legacy COMFYUI_MODELS_BASE_URL to specify the API base."""
+
+    if not raw:
+        return None
+    cleaned = raw.strip()
+    if not cleaned:
+        return None
+    if "://" not in cleaned:
+        cleaned = f"http://{cleaned}"
+    cleaned = cleaned.rstrip("/")
+    suffix = "/api/models"
+    if cleaned.endswith(suffix):
+        return cleaned[: -len(suffix)]
+    return cleaned
 
 
 class WorkflowRepository:
@@ -106,8 +129,8 @@ class WorkflowRepository:
 class ComfyUIModelClient:
     """Client responsible for retrieving model catalog information."""
 
-    def __init__(self, models_base_url: str, timeout: float = 30.0) -> None:
-        self.models_base_url = models_base_url.rstrip("/")
+    def __init__(self, api_base_url: str, timeout: float = 30.0) -> None:
+        self.api_base_url = api_base_url.rstrip("/")
         self.timeout = timeout
         self._client: httpx.AsyncClient | None = None
 
@@ -135,11 +158,10 @@ class ComfyUIModelClient:
             raise RuntimeError("Model client not initialised")
 
         effective_path = path.strip("/") if path else ""
-        params: dict[str, Any] = {"recursive": str(recursive).lower()}
-        if effective_path:
-            params["path"] = effective_path
+        params: dict[str, Any] = {}
 
-        url = self._compose_url()
+        api_path = self._resolve_api_path(effective_path)
+        url = self._compose_url(api_path)
 
         response = await self._client.get(url, params=params)
         response.raise_for_status()
@@ -149,7 +171,8 @@ class ComfyUIModelClient:
         if isinstance(parsed, dict) and set(parsed.keys()) == {"raw"}:
             return {
                 "requested_path": effective_path,
-                "base_url": self.models_base_url,
+                "base_url": self.api_base_url,
+                "endpoint": url,
                 "recursive": recursive,
                 "fetched_at": datetime.now(tz=timezone.utc).isoformat(),
                 "entries": [],
@@ -172,7 +195,8 @@ class ComfyUIModelClient:
 
         return {
             "requested_path": effective_path,
-            "base_url": self.models_base_url,
+            "base_url": self.api_base_url,
+            "endpoint": url,
             "recursive": recursive,
             "fetched_at": datetime.now(tz=timezone.utc).isoformat(),
             "entries": flattened,
@@ -190,8 +214,23 @@ class ComfyUIModelClient:
         except json.JSONDecodeError:
             return {"raw": text}
 
-    def _compose_url(self) -> str:
-        return self.models_base_url
+    def _compose_url(self, path: str | None = None) -> str:
+        base = urljoin(self.api_base_url + "/", "api/models/")
+        if path:
+            return urljoin(base, path)
+        return base.rstrip("/")
+
+    def _resolve_api_path(self, path: str | None) -> str | None:
+        if not path:
+            return None
+        segments = [segment for segment in path.split("/") if segment]
+        if not segments:
+            return None
+        if segments[0].lower() == "models":
+            segments = segments[1:]
+        if not segments:
+            return None
+        return "/".join(segments)
 
     def _flatten(self, payload: Any, *, prefix: str = "") -> list[dict[str, Any]]:
         """Flatten nested model information into searchable entries."""
@@ -293,7 +332,7 @@ def create_server(config: ServerConfig) -> FastMCP:
     """Build the configured FastMCP server."""
 
     workflow_repo = WorkflowRepository(config.workflow_dir)
-    model_client = ComfyUIModelClient(config.models_base_url, timeout=config.http_timeout)
+    model_client = ComfyUIModelClient(config.api_base_url, timeout=config.http_timeout)
 
     @asynccontextmanager
     async def lifespan(_: FastMCP):
@@ -339,7 +378,7 @@ def create_server(config: ServerConfig) -> FastMCP:
             entries.append(description)
         entries.sort(key=lambda item: item["relative_path"])
         if context is not None:
-            context.info(f"Found {len(entries)} workflow files")
+            await context.info(f"Found {len(entries)} workflow files")
         return {
             "workflow_root": str(workflow_repo.root),
             "count": len(entries),
@@ -363,7 +402,7 @@ def create_server(config: ServerConfig) -> FastMCP:
         except json.JSONDecodeError:
             parsed = None
         if context is not None:
-            context.info(f"Read workflow {relative_path}")
+            await context.info(f"Read workflow {relative_path}")
         return {
             "relative_path": relative_path,
             "text": text,
@@ -387,7 +426,7 @@ def create_server(config: ServerConfig) -> FastMCP:
 
         result = await model_client.list_models(path=path, recursive=recursive, search=search)
         if context is not None:
-            context.info(
+            await context.info(
                 f"Retrieved {len(result.get('entries', []))} model entries from {result.get('base_url')}"
             )
         return result
@@ -409,7 +448,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--models-base-url",
-        help="Explicit URL for the ComfyUI models API (overrides the derived value)",
+        help=(
+            "[Deprecated] Explicit URL for the legacy ComfyUI models endpoint. "
+            "Prefer configuring --api-base-url instead."
+        ),
     )
     parser.add_argument(
         "--http-timeout",

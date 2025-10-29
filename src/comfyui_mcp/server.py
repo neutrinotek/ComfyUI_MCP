@@ -11,13 +11,22 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Optional
-from urllib.parse import urljoin
 
 import anyio
 import httpx
 from mcp.server.fastmcp import Context
 from mcp.server.fastmcp.resources import FileResource
 from mcp.server.fastmcp.server import FastMCP
+
+
+# Mapping from user-friendly model kinds to ComfyUI loader node metadata
+MODEL_KIND_MAP: dict[str, tuple[str, str]] = {
+    "checkpoints": ("CheckpointLoaderSimple", "ckpt_name"),
+    "loras": ("LoraLoader", "lora_name"),
+    "vae": ("VAELoader", "vae_name"),
+    "clip": ("CLIPLoader", "clip_name"),
+    "controlnet": ("ControlNetLoader", "control_net_name"),
+}
 
 
 @dataclass(slots=True)
@@ -148,185 +157,71 @@ class ComfyUIModelClient:
     async def list_models(
         self,
         *,
-        path: str | None = None,
-        recursive: bool = True,
+        kind: str | None = None,
+        recursive: bool = False,
         search: str | None = None,
-    ) -> dict[str, Any]:
-        """Fetch models from the ComfyUI API."""
+    ) -> dict[str, Any] | list[str]:
+        """Fetch model information from the ComfyUI object info endpoints."""
 
         if self._client is None:
             raise RuntimeError("Model client not initialised")
 
-        effective_path = path.strip("/") if path else ""
-        params: dict[str, Any] = {}
+        kinds = [kind] if kind else list(MODEL_KIND_MAP.keys())
+        if recursive:
+            kinds = list(dict.fromkeys(kinds))
 
-        api_path = self._resolve_api_path(effective_path)
-        url = self._compose_url(api_path)
+        search_lower = search.lower() if search else None
+        inventory: dict[str, list[str]] = {}
+        errors: dict[str, str] = {}
 
-        response = await self._client.get(url, params=params)
-        response.raise_for_status()
+        for model_kind in kinds:
+            if model_kind not in MODEL_KIND_MAP:
+                raise ValueError(f"Unsupported model kind: {model_kind}")
+            try:
+                choices = await self._choices_for_kind(model_kind)
+            except Exception as exc:  # pragma: no cover - defensive logging path
+                inventory[model_kind] = []
+                errors[model_kind] = str(exc)
+                continue
 
-        parsed = await self._parse_response(response)
+            if search_lower:
+                choices = [item for item in choices if search_lower in item.lower()]
+            inventory[model_kind] = sorted(dict.fromkeys(choices))
 
-        if isinstance(parsed, dict) and set(parsed.keys()) == {"raw"}:
-            return {
-                "requested_path": effective_path,
-                "base_url": self.api_base_url,
-                "endpoint": url,
-                "recursive": recursive,
-                "fetched_at": datetime.now(tz=timezone.utc).isoformat(),
-                "entries": [],
-                "raw_response": parsed["raw"],
-            }
-
-        flattened = self._flatten(parsed, prefix=effective_path)
-        if search:
-            needle = search.lower()
-            flattened = [
-                entry
-                for entry in flattened
-                if needle in entry["name"].lower()
-                or needle in entry.get("path", "").lower()
-                or any(
-                    needle in str(value).lower()
-                    for value in entry.get("metadata", {}).values()
-                )
-            ]
-
-        return {
-            "requested_path": effective_path,
+        summary: dict[str, Any] = {
             "base_url": self.api_base_url,
-            "endpoint": url,
-            "recursive": recursive,
-            "fetched_at": datetime.now(tz=timezone.utc).isoformat(),
-            "entries": flattened,
+            "kinds": kinds,
+            "counts": {kind: len(items) for kind, items in inventory.items()},
+            "retrieved_at": datetime.now(tz=timezone.utc).isoformat(),
+            "models": inventory,
         }
+        if errors:
+            summary["errors"] = errors
 
-    async def _parse_response(self, response: httpx.Response) -> Any:
-        """Parse the API response as JSON, falling back to text."""
+        if kind and not recursive:
+            return inventory.get(kind, [])
+        return summary
 
-        content_type = response.headers.get("content-type", "")
-        text = response.text
-        if "application/json" in content_type:
-            return response.json()
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError:
-            return {"raw": text}
+    async def _choices_for_kind(self, kind: str) -> list[str]:
+        client = self._client
+        if client is None:
+            raise RuntimeError("Model client not initialised")
 
-    def _compose_url(self, path: str | None = None) -> str:
-        base = urljoin(self.api_base_url + "/", "api/models/")
-        if path:
-            return urljoin(base, path)
-        return base.rstrip("/")
-
-    def _resolve_api_path(self, path: str | None) -> str | None:
-        if not path:
-            return None
-        segments = [segment for segment in path.split("/") if segment]
-        if not segments:
-            return None
-        if segments[0].lower() == "models":
-            segments = segments[1:]
-        if not segments:
-            return None
-        return "/".join(segments)
-
-    def _flatten(self, payload: Any, *, prefix: str = "") -> list[dict[str, Any]]:
-        """Flatten nested model information into searchable entries."""
-
-        entries: list[dict[str, Any]] = []
-
-        def handle(value: Any, segments: list[str]) -> None:
-            if isinstance(value, dict):
-                if _looks_like_file_entry(value):
-                    entries.append(_normalise_file_entry(value, segments))
-                    return
-
-                files_handled = False
-                if "files" in value:
-                    files_handled = True
-                    handle(value["files"], segments)
-                if "items" in value:
-                    files_handled = True
-                    handle(value["items"], segments)
-                if "models" in value and isinstance(value["models"], (list, dict)):
-                    files_handled = True
-                    handle(value["models"], segments)
-
-                directories = value.get("directories") or value.get("children") or value.get("folders")
-                if directories is not None:
-                    files_handled = True
-                    if isinstance(directories, dict):
-                        for name, child in directories.items():
-                            handle(child, segments + [str(name)])
-                    elif isinstance(directories, list):
-                        for child in directories:
-                            handle(child, segments)
-
-                if files_handled:
-                    remaining = {
-                        key: val
-                        for key, val in value.items()
-                        if key
-                        not in {"files", "items", "models", "directories", "children", "folders"}
-                    }
-                    if remaining:
-                        handle(remaining, segments)
-                else:
-                    for key, child in value.items():
-                        handle(child, segments + [str(key)])
-            elif isinstance(value, list):
-                for item in value:
-                    handle(item, segments)
-            else:
-                entries.append(
-                    {
-                        "kind": "file",
-                        "name": str(value),
-                        "path": "/".join([s for s in segments if s]) or prefix,
-                        "metadata": {},
-                    }
-                )
-
-        base_segments = [s for s in prefix.split("/") if s] if prefix else []
-        handle(payload, base_segments)
-        unique_entries: dict[tuple[str, str], dict[str, Any]] = {}
-        for entry in entries:
-            key = (entry.get("path", ""), entry["name"])
-            if key not in unique_entries:
-                unique_entries[key] = entry
-        return list(unique_entries.values())
-
-
-def _looks_like_file_entry(data: dict[str, Any]) -> bool:
-    keys = set(data)
-    file_keys = {"name", "filename", "path", "file", "title"}
-    return bool(keys & file_keys) and not keys & {"directories", "children", "folders"}
-
-
-def _normalise_file_entry(data: dict[str, Any], segments: list[str]) -> dict[str, Any]:
-    metadata = {
-        key: value
-        for key, value in data.items()
-        if key not in {"name", "filename", "path", "file", "title"}
-    }
-    name = (
-        str(data.get("name")
-            or data.get("filename")
-            or data.get("title")
-            or data.get("file")
-            or data.get("path")
-            or "entry")
-    )
-    source_path = data.get("path") or "/".join(segments + [name])
-    return {
-        "kind": "file",
-        "name": name,
-        "path": str(source_path),
-        "metadata": metadata,
-    }
-
+        node_class, input_name = MODEL_KIND_MAP[kind]
+        url = f"{self.api_base_url}/object_info/{node_class}"
+        response = await client.get(url)
+        response.raise_for_status()
+        payload = response.json()
+        input_block = payload.get("input", {}) or {}
+        field = (
+            input_block.get("required", {}).get(input_name)
+            or input_block.get("properties", {}).get(input_name)
+            or {}
+        )
+        choices = field.get("choices") or field.get("items") or []
+        if isinstance(choices, dict) and "enum" in choices:
+            choices = choices["enum"]
+        return [item for item in choices if isinstance(item, str)]
 
 def create_server(config: ServerConfig) -> FastMCP:
     """Build the configured FastMCP server."""
@@ -412,23 +307,32 @@ def create_server(config: ServerConfig) -> FastMCP:
     @server.tool(
         name="list_models",
         description=(
-            "Inspect the ComfyUI model folders via the configured API endpoint."
-            " Supports recursive traversal and basic search."
+            "List models exposed by the configured ComfyUI server using the object"
+            " info endpoints. Specify a kind to get a flat list or use recursive"
+            " mode to aggregate multiple kinds."
         ),
     )
     async def list_models(
-        path: str | None = None,
-        recursive: bool = True,
+        kind: str | None = None,
+        recursive: bool = False,
         search: str | None = None,
         context: Context | None = None,
-    ) -> dict[str, Any]:
-        """List models available in the remote ComfyUI instance."""
+    ) -> dict[str, Any] | list[str]:
+        """List models available on the remote ComfyUI instance."""
 
-        result = await model_client.list_models(path=path, recursive=recursive, search=search)
+        result = await model_client.list_models(kind=kind, recursive=recursive, search=search)
         if context is not None:
-            await context.info(
-                f"Retrieved {len(result.get('entries', []))} model entries from {result.get('base_url')}"
-            )
+            if isinstance(result, dict):
+                counts = result.get("counts", {})
+                await context.info(
+                    "Model inventory retrieved",
+                    data={"kinds": list(counts.keys()), "counts": counts},
+                )
+            else:
+                await context.info(
+                    "Model inventory retrieved",
+                    data={"kind": kind, "count": len(result)},
+                )
         return result
 
     return server

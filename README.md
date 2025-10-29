@@ -11,10 +11,19 @@ This repository provides a Model Context Protocol (MCP) server that exposes loca
 
 ## Installation
 
-Create a virtual environment (recommended) and install the package in editable mode:
+Create a virtual environment (recommended) and install the package in editable mode with your preferred installer:
 
 ```bash
 pip install -e .
+```
+
+The project also works with [uv](https://github.com/astral-sh/uv) so you can install or run it without using `pip` directly:
+
+```bash
+uv pip install -e .
+
+# or run without installing into the current environment
+uvx --from . comfyui-mcp --help
 ```
 
 ## Running the server
@@ -31,13 +40,16 @@ The installed `comfyui-mcp` entry point launches the MCP server over stdio. Comm
 
 Example stdio launch configuration for a Cursor MCP JSON definition:
 
+If you prefer `uvx`, the same configuration can be expressed as:
+
 ```json
 {
   "comfyui": {
-    "command": "python",
+    "command": "uvx",
     "args": [
-      "-m",
-      "comfyui_mcp.server",
+      "--from",
+      "comfyui-mcp",
+      "comfyui-mcp",
       "--workflow-dir",
       "./workflows",
       "--models-base-url",

@@ -19,3 +19,6 @@ comfyui-mcp = "comfyui_mcp.server:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.uv.sources]
+comfyui-mcp = { path = "." }
